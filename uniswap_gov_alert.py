@@ -1,15 +1,22 @@
 #!/usr/bin/env python3
 """
-Uniswap Governance → Telegram alert bot (GitHub Actions friendly).
+Uniswap Governance → Telegram alert bot (local test version).
 
-- Watches the Uniswap "Proposal Discussion / RFC" category
-  at https://gov.uniswap.org/c/proposal-discussion/5
+- Watches the Uniswap "Proposal Discussion / RFC" category:
+  https://gov.uniswap.org/c/proposal-discussion/5
 
-- On normal runs:
-    * On first run: initializes last_seen to the latest topic (no spam).
-    * On subsequent runs: sends alerts for topics with id > last_seen.
-- On FORCE_LATEST=true runs:
-    * Ignores state and sends a single alert for the latest topic.
+- Env vars:
+    TELEGRAM_BOT_TOKEN  - your bot token from BotFather
+    TELEGRAM_CHAT_ID    - your chat id (the chat with the bot)
+    FORCE_LATEST        - "true"/"1"/"yes" to send a test alert for latest topic
+
+Normal mode:
+    - Tracks last_seen topic ID in uniswap_last_seen.json
+    - Sends alerts only for topics with id > last_seen
+
+Test mode (FORCE_LATEST=true):
+    - Ignores state and sends a [TEST] alert for the latest topic
+    - Does NOT modify the state file
 """
 
 import os
@@ -26,13 +33,13 @@ STATE_FILE = "uniswap_last_seen.json"
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
-
 FORCE_LATEST = os.getenv("FORCE_LATEST", "").lower() in ("1", "true", "yes")
 
 
 # ---- Helpers ----
 
 def send_telegram(text: str) -> None:
+    """Send a Telegram message using the bot token & chat ID from env vars."""
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         raise RuntimeError("TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID not set")
 
@@ -40,24 +47,27 @@ def send_telegram(text: str) -> None:
     payload = {
         "chat_id": TELEGRAM_CHAT_ID,
         "text": text,
-        "parse_mode": "Markdown",
-        "disable_web_page_preview": False,
+        # no parse_mode → plain text, less likely to error
     }
     r = requests.post(url, json=payload, timeout=15)
+    print("Telegram response:", r.status_code, r.text)  # debug line
     r.raise_for_status()
 
 
+
 def fetch_uniswap_topics() -> List[Dict[str, Any]]:
+    """Fetch topics from the Uniswap Proposal Discussion category."""
     r = requests.get(UNISWAP_CATEGORY_JSON, timeout=15)
     r.raise_for_status()
     data = r.json()
     topics = data.get("topic_list", {}).get("topics", [])
-    # Discourse usually returns newest-first already, but let's be explicit:
+    # ensure newest-first
     topics.sort(key=lambda t: t["id"], reverse=True)
     return topics
 
 
 def load_last_seen(path: str) -> int:
+    """Load the last seen topic id from a JSON file, or 0 if not present."""
     if not os.path.exists(path):
         return 0
     with open(path, "r") as f:
@@ -66,6 +76,7 @@ def load_last_seen(path: str) -> int:
 
 
 def save_last_seen(path: str, topic_id: int) -> None:
+    """Save the last seen topic id to a JSON file."""
     with open(path, "w") as f:
         json.dump({"last_topic_id": int(topic_id)}, f)
 
@@ -74,8 +85,9 @@ def save_last_seen(path: str, topic_id: int) -> None:
 
 def run_force_latest(topics: List[Dict[str, Any]]) -> None:
     """
-    Test mode: ignore state and just send an alert for the newest topic.
-    Does NOT update the state file, so it won't interfere with normal runs.
+    Test mode: ignore state and send an alert for the newest topic.
+
+    Does NOT update the state file.
     """
     if not topics:
         print("No topics found on Uniswap forum (force_latest).")
@@ -88,7 +100,7 @@ def run_force_latest(topics: List[Dict[str, Any]]) -> None:
     url = f"{UNISWAP_BASE_URL}/t/{slug}/{topic_id}"
 
     msg = (
-        f"*[TEST]* Latest topic on {UNISWAP_FORUM_NAME}\n"
+        f"*[TEST]* Latest topic on {UNISWAP_FORUM_NAME}*\n"
         f"{title}\n"
         f"{url}"
     )
@@ -97,12 +109,13 @@ def run_force_latest(topics: List[Dict[str, Any]]) -> None:
 
 
 def run_normal(topics: List[Dict[str, Any]], state_path: str) -> None:
+    """Normal mode: track new topics since last_seen and alert on them."""
     if not topics:
         print("No topics found on Uniswap forum.")
         return
 
     if not os.path.exists(state_path):
-        # First-ever run: initialize to latest topic to avoid spamming history.
+        # First run: initialize last_seen to the current max id to avoid spam
         max_id = max(t["id"] for t in topics)
         save_last_seen(state_path, max_id)
         print(f"Initialized last_seen to {max_id}, no alerts sent on first run.")
@@ -115,7 +128,7 @@ def run_normal(topics: List[Dict[str, Any]], state_path: str) -> None:
         print(f"No new topics since last_seen={last_seen}.")
         return
 
-    # We want oldest→newest for notifications:
+    # oldest→newest for clean chronological alerts
     new_topics_sorted = sorted(new_topics, key=lambda t: t["id"])
 
     for t in new_topics_sorted:
@@ -144,9 +157,9 @@ def main() -> None:
         print("Running in FORCE_LATEST (test) mode.")
         run_force_latest(topics)
     else:
+        print("Running in normal mode.")
         run_normal(topics, STATE_FILE)
 
 
 if __name__ == "__main__":
     main()
-
